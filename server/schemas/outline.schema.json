@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "structureName", "structureReason", "sectionMode", "route"],
+  "properties": {
+    "title": { "type": "string" },
+    "structureName": { "type": "string" },
+    "structureReason": { "type": "string" },
+    "sectionMode": {
+      "type": "string",
+      "enum": ["连续叙事", "稀疏分节", "清晰分节"]
+    },
+    "route": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["beat", "direction", "material", "transition", "mediaHint", "sectionBreak"],
+        "properties": {
+          "beat": { "type": "string" },
+          "direction": { "type": "string" },
+          "material": { "type": "string" },
+          "transition": { "type": "string" },
+          "mediaHint": { "type": "string" },
+          "sectionBreak": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["angles"],
+  "properties": {
+    "angles": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "description"],
+        "properties": {
+          "title": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}
