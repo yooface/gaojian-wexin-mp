@@ -31,6 +31,15 @@ const coversRoot = path.join(dataRoot, "assets", "covers");
 const databaseFile = path.join(dataRoot, "gaojian.db");
 const skillsRoot = path.join(codexHome, "skills");
 const claudeSkillsRoot = path.join(claudeHome, "skills");
+const layoutJobs = new Map();
+const themePreviewFiles = new Map([
+  ["moyu-green", "moyu-green.html"],
+  ["red-white", "red-white.html"],
+  ["graphite-minimal", "graphite-minimal.html"],
+  ["zen-whitespace", "zen-whitespace.html"],
+  ["moyu-ticket", "moyu-ticket.html"],
+  ["olive-journal", "olive-journal.html"],
+]);
 const port = Number(process.env.GAOJIAN_PORT || 4174);
 const codexCommand = process.platform === "win32" ? "codex.cmd" : "codex";
 const claudeCommand = process.platform === "win32" ? "claude.cmd" : "claude";
@@ -51,6 +60,7 @@ database.exec(`
     excerpt TEXT NOT NULL DEFAULT '',
     markdown TEXT NOT NULL DEFAULT '',
     idea TEXT NOT NULL DEFAULT '',
+    workflow_json TEXT NOT NULL DEFAULT '{}',
     outline_json TEXT,
     status TEXT NOT NULL DEFAULT '草稿',
     source TEXT NOT NULL DEFAULT '本地草稿',
@@ -90,6 +100,7 @@ if (!styleSampleColumns.has("published_at")) database.exec("ALTER TABLE style_sa
 if (!styleSampleColumns.has("metadata_checked_at")) database.exec("ALTER TABLE style_samples ADD COLUMN metadata_checked_at TEXT NOT NULL DEFAULT ''");
 const articleColumns = new Set(database.prepare("PRAGMA table_info(articles)").all().map((column) => column.name));
 if (!articleColumns.has("settings_json")) database.exec("ALTER TABLE articles ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'");
+if (!articleColumns.has("workflow_json")) database.exec("ALTER TABLE articles ADD COLUMN workflow_json TEXT NOT NULL DEFAULT '{}'");
 database.prepare("UPDATE style_samples SET metadata_checked_at = '' WHERE published_at = '' AND metadata_checked_at <> '' AND metadata_checked_at NOT LIKE 'v2:%'").run();
 
 function run(command, args, timeout = 12_000, input = null, options = {}) {
@@ -461,6 +472,8 @@ async function generateDraft({ agent = "codex", idea, outline, styleStrength = "
 文风浓度：${styleStrength}。${strengthInstruction}
 不得编造用户经历、数据或事实；缺少真实材料时，用【请补充：具体需要什么】留下短而明确的占位。文章使用 Markdown，第一行是 # 标题。全文长度由内容决定，不为凑字数重复解释。
 
+标题要求：在 title 中给出最适合直接发布的标题；同时在 titleCandidates 中给出恰好 10 个可独立使用的标题候选，title 必须包含在这 10 个候选中。候选之间要有真实差异，可以分别偏信息型、问题型、具体场景型、经验型或轻悬念型；不得使用虚假数字、夸张承诺、震惊体，也不得歪曲正文事实。标题要有网感但不能像批量套模板。
+
 语言禁令：全文禁用“不是……而是……”“不是什么……是……”“重点不在……而在……”“与其说……不如说……”以及同构的先否定再转折句式；禁用“首先、其次、最后”“在这个时代”“真正的……从来不是……”等常见 AI 套话。直接陈述事实、判断和因果。完成初稿后自行逐段检查并改写所有违反禁令的句子，不要强行升华。
 
 用户原始想法：${String(idea).slice(0, 12_000)}
@@ -500,7 +513,7 @@ ${dnaContext}
   } finally { await rm(workspace, { recursive: true, force: true }); }
 }
 
-async function layoutArticle({
+async function performLayoutArticle({
   markdown,
   theme,
   showToc = true,
@@ -531,6 +544,23 @@ async function layoutArticle({
     if (!await exists(output)) throw new Error("GZH Design 未生成排版文件");
     return { html: await readFile(output, "utf8"), theme };
   } finally { await rm(workspace, { recursive: true, force: true }); }
+}
+
+async function layoutArticle(input = {}) {
+  const jobKey = JSON.stringify({
+    markdown: String(input.markdown || ""),
+    theme: String(input.theme || ""),
+    showToc: input.showToc !== false,
+    showSignature: input.showSignature !== false,
+    author: String(input.author || ""),
+    authorBio: String(input.authorBio || ""),
+    digest: String(input.digest || ""),
+  });
+  const existingJob = layoutJobs.get(jobKey);
+  if (existingJob) return existingJob;
+  const job = performLayoutArticle(input).finally(() => layoutJobs.delete(jobKey));
+  layoutJobs.set(jobKey, job);
+  return job;
 }
 
 async function listGeneratedImages(directory) {
@@ -672,6 +702,18 @@ async function writeJsonFile(file, value) {
 
 async function getArticles() {
   return database.prepare("SELECT * FROM articles ORDER BY updated_at DESC").all().map((row) => ({
+    ...(() => {
+      try {
+        const workflow = JSON.parse(row.workflow_json || "{}");
+        return {
+          angles: Array.isArray(workflow.angles) ? workflow.angles : null,
+          selectedAngle: workflow.selectedAngle || null,
+          titleCandidates: Array.isArray(workflow.titleCandidates) ? workflow.titleCandidates : null,
+        };
+      } catch {
+        return { angles: null, selectedAngle: null, titleCandidates: null };
+      }
+    })(),
     id: row.id,
     title: row.title,
     excerpt: row.excerpt,
@@ -700,25 +742,33 @@ async function saveArticle(input, forcedId = null) {
     excerpt: String(input.excerpt || markdown.replace(/^#+\s+/gm, "").replace(/\s+/g, " ").slice(0, 120) || existing?.excerpt || ""),
     markdown,
     idea: String(input.idea ?? existing?.idea ?? "").slice(0, 20_000),
+    angles: Array.isArray(input.angles) ? input.angles.slice(0, 10) : existing?.angles ?? null,
+    selectedAngle: input.selectedAngle && typeof input.selectedAngle === "object"
+      ? input.selectedAngle
+      : existing?.selectedAngle ?? null,
+    titleCandidates: Array.isArray(input.titleCandidates)
+      ? input.titleCandidates.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 10)
+      : existing?.titleCandidates ?? null,
     outline: input.outline ?? existing?.outline ?? null,
     status: ["草稿", "已排版", "已发布"].includes(input.status) ? input.status : existing?.status || "草稿",
     source: String(input.source || existing?.source || "本地草稿").slice(0, 40),
     theme: input.theme ?? existing?.theme ?? null,
     layoutHtml: String(input.layoutHtml ?? existing?.layoutHtml ?? "").slice(0, 2_000_000),
     articleSettings: input.articleSettings && typeof input.articleSettings === "object"
-      ? input.articleSettings
+      ? { ...(existing?.articleSettings || {}), ...input.articleSettings }
       : existing?.articleSettings || {},
     createdAt: existing?.createdAt || input.createdAt || now,
     updatedAt: now,
   };
   database.prepare(`
-    INSERT INTO articles (id, title, excerpt, markdown, idea, outline_json, status, source, theme, layout_html, settings_json, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO articles (id, title, excerpt, markdown, idea, workflow_json, outline_json, status, source, theme, layout_html, settings_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       title = excluded.title,
       excerpt = excluded.excerpt,
       markdown = excluded.markdown,
       idea = excluded.idea,
+      workflow_json = excluded.workflow_json,
       outline_json = excluded.outline_json,
       status = excluded.status,
       source = excluded.source,
@@ -726,7 +776,7 @@ async function saveArticle(input, forcedId = null) {
       layout_html = excluded.layout_html,
       settings_json = excluded.settings_json,
       updated_at = excluded.updated_at
-  `).run(article.id, article.title, article.excerpt, article.markdown, article.idea, article.outline ? JSON.stringify(article.outline) : null, article.status, article.source, article.theme, article.layoutHtml, JSON.stringify(article.articleSettings), article.createdAt, article.updatedAt);
+  `).run(article.id, article.title, article.excerpt, article.markdown, article.idea, JSON.stringify({ angles: article.angles, selectedAngle: article.selectedAngle, titleCandidates: article.titleCandidates }), article.outline ? JSON.stringify(article.outline) : null, article.status, article.source, article.theme, article.layoutHtml, JSON.stringify(article.articleSettings), article.createdAt, article.updatedAt);
   return article;
 }
 
@@ -1272,6 +1322,18 @@ createServer(async (req, res) => {
   if (url.pathname === "/api/writing/cover" && req.method === "POST") {
     try { return send(res, 200, JSON.stringify(await generateCovers(await readJson(req)))); }
     catch (error) { return send(res, 400, JSON.stringify({ error: error.message })); }
+  }
+  const themePreviewRoute = url.pathname.match(/^\/api\/theme-previews\/([a-z-]+)$/);
+  if (themePreviewRoute && req.method === "GET") {
+    const previewFile = themePreviewFiles.get(themePreviewRoute[1]);
+    if (!previewFile) return send(res, 404, "Theme preview not found", "text/plain; charset=utf-8");
+    try {
+      const fragment = await readFile(path.join(path.dirname(gzhSkillPath), "docs", "gallery", previewFile), "utf8");
+      const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html{background:#fff}body{width:677px;margin:0;padding:20px;box-sizing:border-box;background:#fff;transform:scale(.49);transform-origin:top left;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}*{box-sizing:border-box}</style></head><body>${fragment}</body></html>`;
+      return send(res, 200, html, "text/html; charset=utf-8");
+    } catch {
+      return send(res, 404, "请先安装 GZH Design Skill", "text/plain; charset=utf-8");
+    }
   }
   if (url.pathname.startsWith("/api/covers/") && req.method === "GET") {
     try {

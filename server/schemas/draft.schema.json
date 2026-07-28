@@ -1,9 +1,15 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["title", "markdown"],
+  "required": ["title", "titleCandidates", "markdown"],
   "properties": {
     "title": { "type": "string" },
+    "titleCandidates": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": { "type": "string" }
+    },
     "markdown": { "type": "string" }
   }
 }

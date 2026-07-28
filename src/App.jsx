@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   ArrowLeft,
   ArrowsClockwise,
   CaretDown,
+  CaretLeft,
   CaretRight,
   Check,
   CheckCircle,
@@ -30,6 +31,7 @@ import {
   PuzzlePiece,
   ShieldCheck,
   Sparkle,
+  TextAa,
   Trash,
   TrashSimple,
   UploadSimple,
@@ -47,13 +49,52 @@ const navItems = [
 ];
 
 const themes = [
-  ["摸鱼绿", "#07946f", "#eaf7f1"],
-  ["红白色系", "#ca3434", "#fff0ef"],
-  ["石墨极简风", "#3e4247", "#eff1f3"],
-  ["留白禅意风", "#5b7466", "#eff5f0"],
-  ["摸鱼票据风", "#497969", "#edf5ef"],
-  ["橄榄手记", "#77725a", "#f4f2e7"],
+  ["摸鱼绿", "#07946f", "#eaf7f1", "moyu-green", "卡片丰富，适合教程、清单和工具盘点"],
+  ["红白色系", "#ca3434", "#fff0ef", "red-white", "经典编辑风，适合观点与力量感话题"],
+  ["石墨极简风", "#3e4247", "#eff1f3", "graphite-minimal", "灰阶克制，适合科技、设计和专业观点"],
+  ["留白禅意风", "#5b7466", "#eff5f0", "zen-whitespace", "呼吸感强，适合随笔、生活和深度思考"],
+  ["摸鱼票据风", "#497969", "#edf5ef", "moyu-ticket", "票据式视觉，适合测评和工具类内容"],
+  ["橄榄手记", "#77725a", "#f4f2e7", "olive-journal", "内刊质感，适合案例复盘和系统说明"],
 ];
+
+const defaultArticleSettings = {
+  author: "",
+  authorBio: "",
+  digest: "",
+  showSignature: false,
+};
+
+function normalizeArticleSettings(value = {}) {
+  return {
+    ...value,
+    author: String(value.author || ""),
+    authorBio: String(value.authorBio || ""),
+    digest: String(value.digest || ""),
+    showSignature: Boolean(value.showSignature),
+  };
+}
+
+function textFingerprint(value) {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${text.length}-${(hash >>> 0).toString(36)}`;
+}
+
+function getLayoutSourceKey({ markdown, themeName, showToc, articleSettings }) {
+  return textFingerprint(JSON.stringify({
+    markdown: String(markdown || ""),
+    theme: String(themeName || ""),
+    showToc: Boolean(showToc),
+    author: String(articleSettings?.author || ""),
+    authorBio: String(articleSettings?.authorBio || ""),
+    digest: String(articleSettings?.digest || ""),
+    showSignature: Boolean(articleSettings?.showSignature),
+  }));
+}
 
 function AgentIdentityIcon({ agent, size = 18 }) {
   return agent === "claude" ? <ClaudeCodeIcon size={size} /> : <CodexIcon size={size} />;
@@ -66,6 +107,50 @@ const writingStageLabels = {
   draft: "完整初稿",
 };
 
+const writingFlowSteps = [
+  ["idea", "想法与素材"],
+  ["angles", "选择角度"],
+  ["outline", "确认路线"],
+  ["draft", "全文初稿"],
+  ["preview", "排版预览"],
+];
+
+function getWritingStageAvailability(snapshot = {}) {
+  const hasDraft = Boolean(snapshot.draft?.markdown);
+  return {
+    idea: true,
+    angles: Array.isArray(snapshot.angles) && snapshot.angles.length > 0,
+    outline: Boolean(snapshot.outline),
+    draft: hasDraft,
+    preview: hasDraft,
+  };
+}
+
+function WritingFlow({ activeStage, snapshot, onNavigate, className = "" }) {
+  const availability = getWritingStageAvailability(snapshot);
+  return <nav className={`writing-flow ${className}`.trim()} aria-label="写作流程">
+    {writingFlowSteps.map(([key, label], index) => {
+      const isActive = key === activeStage;
+      const isAvailable = availability[key];
+      const stateClass = isActive ? "active" : isAvailable ? "done" : "locked";
+      return <div className="writing-flow-item" key={key}>
+        <button
+          type="button"
+          className={stateClass}
+          disabled={!isAvailable}
+          aria-current={isActive ? "step" : undefined}
+          title={isAvailable ? `前往${label}` : "完成前面的内容后可用"}
+          onClick={() => !isActive && isAvailable && onNavigate(key)}
+        >
+          <b>{index + 1}</b>
+          <span>{label}</span>
+        </button>
+        {index < writingFlowSteps.length - 1 && <i />}
+      </div>;
+    })}
+  </nav>;
+}
+
 function createWorkspace(article = null) {
   const stage = article?.markdown ? "draft" : article?.outline ? "outline" : "idea";
   const id = `workspace-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
@@ -76,7 +161,10 @@ function createWorkspace(article = null) {
     snapshot: {
       prompt: article?.idea || "",
       stage,
+      angles: article?.angles || null,
+      selectedAngle: article?.selectedAngle || null,
       outline: article?.outline || null,
+      articleSettings: normalizeArticleSettings(article?.articleSettings || defaultArticleSettings),
       draft: article?.markdown ? article : null,
       activeArticleId: article?.id || null,
       saveState: article?.id ? "已保存" : "",
@@ -98,6 +186,18 @@ function getWorkspaceStatus(workspace) {
 const previewSample = {
   previewOnly: true,
   title: "闲鱼代装 Codex 月入过万：谁在替普通人补上那本缺失的说明书？",
+  titleCandidates: [
+    "闲鱼代装 Codex 月入过万：谁在替普通人补上那本缺失的说明书？",
+    "不会装 Codex 的人，正在闲鱼上买一份“顺利开始”",
+    "Codex 越来越强，为什么代安装服务反而火了？",
+    "我逛了一圈闲鱼，发现有人靠安装 Codex 做起了生意",
+    "普通人用上 Codex 之前，还隔着多少道门槛？",
+    "几十块一次的 Codex 代装，卖的到底是什么？",
+    "AI 工具普及之后，先赚钱的是帮别人装好的人",
+    "闲鱼上的 Codex 安装服务，藏着一门小而真实的生意",
+    "当 Codex 遇上普通用户，一次安装也能变成服务",
+    "工具已经够强了，为什么很多人还是愿意花钱找人安装？",
+  ],
   markdown: `# 闲鱼代装 Codex 月入过万：谁在替普通人补上那本缺失的说明书？
 
 > 当 AI 工具越来越强，人和人之间的差距，常常卡在“能不能顺利用起来”。
@@ -179,6 +279,41 @@ function AgentRunPanel({ run }) {
   </section>;
 }
 
+const MarkdownRenderer = lazy(async () => {
+  const [{ default: ReactMarkdown }, { default: remarkGfm }] = await Promise.all([
+    import("react-markdown"),
+    import("remark-gfm"),
+  ]);
+  return {
+    default: ({ children }) => <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+        img: ({ node: _node, ...props }) => <img {...props} loading="lazy" />,
+      }}
+    >
+      {children}
+    </ReactMarkdown>,
+  };
+});
+
+function DraftMarkdown({ markdown, title }) {
+  const normalizedTitle = String(title || "").trim();
+  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const firstContentLine = lines.findIndex((line) => line.trim());
+  if (firstContentLine >= 0) {
+    const heading = lines[firstContentLine].match(/^#\s+(.+?)\s*$/);
+    if (heading && heading[1].trim() === normalizedTitle) lines.splice(firstContentLine, 1);
+  }
+  return <article className="markdown-draft">
+    <div className="markdown-draft-content">
+      <Suspense fallback={<div className="markdown-loading"><CircleNotch className="spin" size={19} />正在打开初稿…</div>}>
+        <MarkdownRenderer>{lines.join("\n").trim()}</MarkdownRenderer>
+      </Suspense>
+    </div>
+  </article>;
+}
+
 function App() {
   const previewRequested = new URLSearchParams(window.location.search).get("screen") === "preview";
   const [page, setPage] = useState(previewRequested ? "preview" : "writer");
@@ -187,8 +322,6 @@ function App() {
   const [theme, setTheme] = useState(themes[0]);
   const [articleFilter, setArticleFilter] = useState("全部");
   const [search, setSearch] = useState("");
-  const [showToc, setShowToc] = useState(true);
-  const [showSignature, setShowSignature] = useState(true);
   const [agentStatus, setAgentStatus] = useState(null);
   const [draftArticle, setDraftArticle] = useState(previewRequested ? previewSample : null);
   const [libraryArticles, setLibraryArticles] = useState([]);
@@ -199,6 +332,7 @@ function App() {
     return { activeWorkspaceId: workspace.id, workspaces: [workspace] };
   });
   const [workspacesReady, setWorkspacesReady] = useState(false);
+  const [previewWorkspaceId, setPreviewWorkspaceId] = useState(null);
 
   const notify = (message) => {
     setToast(message);
@@ -277,6 +411,7 @@ function App() {
 
   const openArticle = (article, destination = "writer") => {
     if (destination === "preview") {
+      setPreviewWorkspaceId(null);
       setDraftArticle(article);
       setPage("preview");
       return;
@@ -324,6 +459,28 @@ function App() {
     }));
   };
 
+  const navigateFromPreview = (stage = "draft") => {
+    if (!previewWorkspaceId) {
+      setPage("writer");
+      return;
+    }
+    setWorkspaceSession((current) => ({
+      activeWorkspaceId: previewWorkspaceId,
+      workspaces: current.workspaces.map((workspace) => workspace.id === previewWorkspaceId
+        ? {
+          ...workspace,
+          snapshot: { ...workspace.snapshot, stage },
+          requestedStage: { stage, id: Date.now() },
+        }
+        : workspace),
+    }));
+    setPage("writer");
+  };
+
+  const previewWorkspace = previewWorkspaceId
+    ? workspaceSession.workspaces.find((workspace) => workspace.id === previewWorkspaceId)
+    : null;
+
   return (
     <div className={`app-shell ${page === "preview" ? "preview-workspace" : ""}`}>
       <aside className="sidebar">
@@ -354,13 +511,13 @@ function App() {
               agentStatus={agentStatus}
               settings={settings}
               onSaved={loadLibrary}
-              onPreview={(draft) => { setDraftArticle(draft); setPage("preview"); }}
+              onPreview={(draft) => { setPreviewWorkspaceId(workspace.id); setDraftArticle(draft); setPage("preview"); }}
             />
           </div>)}
         </div>
         {page === "dna" && <DnaPage notify={notify} />}
         {page === "library" && <LibraryPage search={search} setSearch={setSearch} filter={articleFilter} setFilter={setArticleFilter} articles={filteredArticles} total={libraryArticles.length} loading={libraryLoading} notify={notify} reload={loadLibrary} onEdit={(article) => openArticle(article, "writer")} onPreview={(article) => openArticle(article, "preview")} onNew={startNewArticle} />}
-        {page === "preview" && <PreviewPage article={draftArticle} theme={theme} setTheme={setTheme} showToc={showToc} setShowToc={setShowToc} showSignature={showSignature} setShowSignature={setShowSignature} notify={notify} onSaved={loadLibrary} onBack={() => setPage("writer")} onOpenSkills={() => setPage("skills")} agentStatus={agentStatus} />}
+        {page === "preview" && <PreviewPage key={`${draftArticle?.id || "preview"}:${draftArticle?.updatedAt || textFingerprint(draftArticle?.markdown)}`} article={draftArticle} theme={theme} setTheme={setTheme} notify={notify} onSaved={loadLibrary} onBack={() => navigateFromPreview("draft")} onOpenSkills={() => setPage("skills")} agentStatus={agentStatus} writingSnapshot={previewWorkspace?.snapshot} onNavigateWritingStage={navigateFromPreview} />}
         {page === "skills" && <SkillsPage installed={installed} setInstalled={setInstalled} notify={notify} agentStatus={agentStatus} refreshAgentStatus={refreshAgentStatus} />}
         {page === "settings" && <SettingsPage settings={settings} setSettings={setSettings} notify={notify} agentStatus={agentStatus} refreshAgentStatus={refreshAgentStatus} />}
       </main>
@@ -456,18 +613,23 @@ function AgentPicker({ agents, value, onChange }) {
 
 function WriterPage({ workspace, workspaces, activeWorkspaceId, onSelectWorkspace, onCloseWorkspace, onNewWorkspace, onWorkspaceChange, notify, agentStatus, settings, onSaved, onPreview }) {
   const initial = workspace.snapshot || {};
+  const initialWriterArticleSettings = normalizeArticleSettings(initial.articleSettings || initial.draft?.articleSettings || defaultArticleSettings);
   const [prompt, setPrompt] = useState(initial.prompt || "");
   const [assets, setAssets] = useState([]);
   const assetsRef = useRef([]);
   const [stage, setStage] = useState(initial.stage || "idea");
   const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
   const [angles, setAngles] = useState(initial.angles || null);
   const [generating, setGenerating] = useState(false);
   const [outline, setOutline] = useState(initial.outline || null);
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [selectedAngle, setSelectedAngle] = useState(initial.selectedAngle || null);
   const [outlineError, setOutlineError] = useState("");
+  const [articleSettings, setArticleSettings] = useState(initialWriterArticleSettings);
+  const [articleMetaOpen, setArticleMetaOpen] = useState(Boolean(initialWriterArticleSettings.author || initialWriterArticleSettings.authorBio || initialWriterArticleSettings.digest));
   const [draft, setDraft] = useState(initial.draft || null);
+  const [draftView, setDraftView] = useState("read");
   const [activeArticleId, setActiveArticleId] = useState(initial.activeArticleId || workspace.articleId || null);
   const [draftLoading, setDraftLoading] = useState(false);
   const [draftError, setDraftError] = useState("");
@@ -475,6 +637,9 @@ function WriterPage({ workspace, workspaces, activeWorkspaceId, onSelectWorkspac
   const [selectedAgent, setSelectedAgent] = useState(initial.selectedAgent || "codex");
   const [agentRun, setAgentRun] = useState(null);
   const lastSavedMarkdown = useRef(initial.draft?.markdown || "");
+  useEffect(() => {
+    if (workspace.requestedStage?.stage) setStage(workspace.requestedStage.stage);
+  }, [workspace.requestedStage?.id]);
   const runAgentTask = async (kind, title, endpoint, payload) => {
     const startedAt = Date.now();
     setAgentRun({ kind, title, agent: selectedAgent, startedAt, status: "running", steps: [], error: "" });
@@ -540,6 +705,18 @@ function WriterPage({ workspace, workspaces, activeWorkspaceId, onSelectWorkspac
     addAssets(images, "粘贴");
   };
   useEffect(() => { assetsRef.current = assets; }, [assets]);
+  useEffect(() => {
+    const resetDragging = () => {
+      dragDepth.current = 0;
+      setDragging(false);
+    };
+    window.addEventListener("dragend", resetDragging);
+    window.addEventListener("drop", resetDragging);
+    return () => {
+      window.removeEventListener("dragend", resetDragging);
+      window.removeEventListener("drop", resetDragging);
+    };
+  }, []);
   useEffect(() => () => {
     assetsRef.current.forEach((asset) => {
       if (asset.previewUrl) URL.revokeObjectURL(asset.previewUrl);
@@ -581,7 +758,26 @@ function WriterPage({ workspace, workspaces, activeWorkspaceId, onSelectWorkspac
   const saveDraft = async (candidate = draft, status = "草稿") => {
     if (!candidate?.markdown) return null;
     setSaveState("保存中…");
-    const payload = { ...candidate, id: activeArticleId, title: candidate.title || outline?.title, idea: prompt, outline, status, source: candidate.source || "本地草稿" };
+    const candidateSettings = normalizeArticleSettings(candidate.articleSettings || defaultArticleSettings);
+    const metadataChanged = ["author", "authorBio", "digest", "showSignature"].some((key) => candidateSettings[key] !== articleSettings[key]);
+    const contentChanged = candidate.markdown !== lastSavedMarkdown.current;
+    const payload = {
+      ...candidate,
+      id: activeArticleId,
+      title: candidate.title || outline?.title,
+      idea: prompt,
+      angles,
+      selectedAngle,
+      outline,
+      articleSettings: {
+        ...candidateSettings,
+        ...articleSettings,
+        ...(contentChanged || metadataChanged ? { layoutSourceKey: "" } : {}),
+      },
+      layoutHtml: contentChanged || metadataChanged ? "" : undefined,
+      status,
+      source: candidate.source || "本地草稿",
+    };
     const response = await fetch(activeArticleId ? `/api/library/${activeArticleId}` : "/api/library", { method: activeArticleId ? "PUT" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
     const saved = await response.json();
     if (!response.ok) throw new Error(saved.error || "保存失败");
@@ -597,7 +793,23 @@ function WriterPage({ workspace, workspaces, activeWorkspaceId, onSelectWorkspac
     try {
       const result = await runAgentTask("draft", "正在生成完整初稿", "/api/writing/draft", { agent: selectedAgent, idea: prompt, outline, styleStrength: settings?.styleStrength || "明显带入" });
       setDraft(result);
-      const savedResponse = await fetch(activeArticleId ? `/api/library/${activeArticleId}` : "/api/library", { method: activeArticleId ? "PUT" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...result, idea: prompt, outline, status: "草稿", source: "本地草稿" }) });
+      setDraftView("read");
+      const savedResponse = await fetch(activeArticleId ? `/api/library/${activeArticleId}` : "/api/library", {
+        method: activeArticleId ? "PUT" : "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...result,
+          idea: prompt,
+          angles,
+          selectedAngle,
+          outline,
+          articleSettings: { ...articleSettings, layoutSourceKey: "" },
+          layoutHtml: "",
+          theme: "",
+          status: "草稿",
+          source: "本地草稿",
+        }),
+      });
       const saved = await savedResponse.json();
       if (!savedResponse.ok) throw new Error(saved.error || "初稿已生成，但保存失败");
       setActiveArticleId(saved.id); setDraft({ ...result, ...saved }); setSaveState("已保存"); onSaved?.();
@@ -622,12 +834,13 @@ function WriterPage({ workspace, workspaces, activeWorkspaceId, onSelectWorkspac
       angles,
       outline,
       selectedAngle,
+      articleSettings,
       draft,
       activeArticleId,
       saveState,
       selectedAgent,
     });
-  }, [prompt, stage, angles, outline, selectedAngle, draft, activeArticleId, saveState, selectedAgent]);
+  }, [prompt, stage, angles, outline, selectedAngle, articleSettings, draft, activeArticleId, saveState, selectedAgent]);
   const localAgents = [
     agentStatus?.codex?.installed && agentStatus?.codex?.loggedIn ? { id: "codex", label: "Codex CLI" } : null,
     agentStatus?.claude?.installed && agentStatus?.claude?.authenticated ? {
@@ -640,30 +853,76 @@ function WriterPage({ workspace, workspaces, activeWorkspaceId, onSelectWorkspac
     if (!localAgents.length || localAgents.some((agent) => agent.id === selectedAgent)) return;
     setSelectedAgent(localAgents[0].id);
   }, [agentStatus?.codex?.loggedIn, agentStatus?.claude?.authenticated]);
+  const writingSnapshot = { angles, outline, draft };
+  const openPreview = async () => {
+    if (!draft?.markdown) return;
+    try {
+      const saved = await saveDraft(draft);
+      onPreview(saved || draft);
+    } catch (error) {
+      notify(`保存失败：${error.message}`);
+    }
+  };
+  const navigateWritingStage = (nextStage) => {
+    if (nextStage === "preview") {
+      openPreview();
+      return;
+    }
+    setStage(nextStage);
+  };
   return <section className="page writer-page">
     <Topbar title="写作台" subtitle="把一个念头，慢慢写成一篇文章" status={false} action={<span className="autosave-indicator"><CheckCircle size={18} />{saveState === "保存中…" ? "保存中…" : "自动保存"}</span>} />
     <WorkspaceTabs workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} onSelect={onSelectWorkspace} onClose={onCloseWorkspace} onNew={onNewWorkspace} />
-    <div className="writing-flow" aria-label="写作流程">
-      {[["idea", "想法与素材"], ["angles", "选择角度"], ["outline", "确认路线"], ["draft", "全文初稿"], ["preview", "排版预览"]].map(([key, label], index, steps) => {
-        const order = ["idea", "angles", "outline", "draft", "preview"];
-        const currentIndex = order.indexOf(stage);
-        const className = key === stage ? "active" : index < currentIndex ? "done" : "";
-        return <div className="writing-flow-item" key={key}><span className={className}><b>{index + 1}</b>{label}</span>{index < steps.length - 1 && <i />}</div>;
-      })}
-    </div>
+    <WritingFlow activeStage={stage} snapshot={writingSnapshot} onNavigate={navigateWritingStage} />
     {stage === "idea" ? <>
-      <div className={`writing-field-wrap composer ${dragging ? "is-dragging" : ""} ${generating ? "agent-running" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); addAssets(event.dataTransfer.files); }}>
-        <label htmlFor="writing-prompt">今天想写什么？</label>
-        <textarea id="writing-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} onPaste={handlePromptPaste} placeholder="输入选题、观点，或粘贴你的素材…" />
-        {assets.length > 0 && <div className="composer-assets">{assets.map((asset, index) => <figure key={`${asset.name}-${index}`}><img src={asset.previewUrl} alt="" /><figcaption>{asset.name}</figcaption><button aria-label={`移除${asset.name}`} title="移除图片" onClick={() => removeAsset(index)}><X size={14} /></button></figure>)}</div>}
+      <div
+        className={`writing-field-wrap composer ${dragging ? "is-dragging" : ""} ${generating ? "agent-running" : ""}`}
+        onDragEnter={(event) => {
+          event.preventDefault();
+          if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+          dragDepth.current += 1;
+          setDragging(true);
+        }}
+        onDragOver={(event) => event.preventDefault()}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          dragDepth.current = Math.max(0, dragDepth.current - 1);
+          if (dragDepth.current === 0) setDragging(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          dragDepth.current = 0;
+          setDragging(false);
+          addAssets(event.dataTransfer.files);
+        }}
+      >
+        <div className="composer-main">
+          <label htmlFor="writing-prompt">今天想写什么？</label>
+          <textarea id="writing-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} onPaste={handlePromptPaste} placeholder="输入选题、观点，或粘贴你的素材…" />
+          {assets.length > 0 && <div className="composer-assets">{assets.map((asset, index) => <figure key={`${asset.name}-${index}`}><img src={asset.previewUrl} alt="" /><figcaption>{asset.name}</figcaption><button aria-label={`移除${asset.name}`} title="移除图片" onClick={() => removeAsset(index)}><X size={14} /></button></figure>)}</div>}
+        </div>
         <div className="composer-footer">
           <label className="composer-plus" title="添加图片" aria-label="添加图片"><Plus size={20} /><input type="file" multiple accept="image/*" onChange={(event) => { addAssets(event.target.files); event.target.value = ""; }} /></label>
           <div className="composer-actions">
             <AgentPicker agents={localAgents} value={selectedAgent} onChange={setSelectedAgent} />
-            <button className="primary" disabled={generating} onClick={begin}>{generating ? "Agent 处理中…" : "下一步：看看角度"}</button>
+            <button className="primary" disabled={generating} onClick={begin}>{generating ? "正在生成角度" : "下一步：看看角度"}</button>
           </div>
         </div>
       </div>
+      <details className="article-meta" open={articleMetaOpen} onToggle={(event) => setArticleMetaOpen(event.currentTarget.open)}>
+        <summary>
+          <span><FileText size={17} /><b>文章信息</b><small>可选</small></span>
+          <span>{articleSettings.author || "未填写，默认不显示作者签名"}<CaretDown size={15} /></span>
+        </summary>
+        <div className="article-meta-fields">
+          <label><span>作者名称</span><input value={articleSettings.author} onChange={(event) => setArticleSettings((current) => ({ ...current, author: event.target.value }))} placeholder="例如：稿间编辑部" /></label>
+          <label><span>作者简介</span><input value={articleSettings.authorBio} onChange={(event) => setArticleSettings((current) => ({ ...current, authorBio: event.target.value }))} placeholder="一句话介绍作者" /></label>
+          <label className="article-meta-digest"><span>文章摘要</span><input value={articleSettings.digest} onChange={(event) => setArticleSettings((current) => ({ ...current, digest: event.target.value }))} placeholder="用于主题中的摘要或引言组件" /></label>
+          <div className="article-meta-signature">
+            <Toggle label="显示作者签名" checked={articleSettings.showSignature} setChecked={(value) => setArticleSettings((current) => ({ ...current, showSignature: value }))} />
+          </div>
+        </div>
+      </details>
       {agentRun?.kind === "angles" && (generating || agentRun.status === "failed") && <AgentRunPanel run={agentRun} />}
     </> : stage === "angles" ? <section className="angle-step">
       <div className="step-heading-row">
@@ -705,7 +964,16 @@ function WriterPage({ workspace, workspaces, activeWorkspaceId, onSelectWorkspac
       </div>;})}</div>
       <div className="style-strength-row"><div><b>文风浓度</b><span>写作时会同时参考 DNA 和相关原文片段</span></div><strong>{settings?.styleStrength || "明显带入"}</strong></div>
       <div className="outline-actions"><button className="text-button" onClick={() => { setOutline(null); setStage("angles"); }}><ArrowLeft size={17} /> 换一个角度</button><button className="primary" disabled={(outline?.route || []).length < 1} onClick={generateFullDraft}>确认路线，生成全文</button></div>
-    </section> : <section className="draft-step"><div className="step-heading"><span>全文初稿 {saveState && `· ${saveState}`}</span><h2>{draft?.title || outline?.title}</h2><p>{draftLoading ? "Codex 正在按确认后的路线写作，下方会显示实时执行状态。" : "全文已经生成。修改会自动保存，也可以直接进入排版。"}</p></div>{draftLoading && agentRun?.kind === "draft" ? <AgentRunPanel run={agentRun} /> : draft ? <div className="full-draft-editor"><textarea value={draft.markdown} onChange={(event) => setDraft((current) => ({ ...current, markdown: event.target.value }))} /><div className="draft-actions"><button className="secondary icon-button" onClick={generateFullDraft}><ArrowsClockwise size={18} />重新生成全文</button><button className="primary" onClick={async () => { try { const saved = await saveDraft(draft); onPreview(saved || draft); } catch (error) { notify(`保存失败：${error.message}`); } }}>进入排版预览</button></div></div> : <div className="draft-loading error"><span>{draftError || "全文生成未完成"}</span><button className="secondary" onClick={() => setStage("outline")}>返回提纲</button><button className="primary" onClick={generateFullDraft}>重试生成全文</button></div>}</section>}
+    </section> : <section className="draft-step"><div className="step-heading"><span>全文初稿 {saveState && `· ${saveState}`}</span><h2>{draft?.title || outline?.title}</h2><p>{draftLoading ? "Codex 正在按确认后的路线写作，下方会显示实时执行状态。" : "先在阅读模式检查文章，需要修改时再切换到编辑。"}</p></div>{draftLoading && agentRun?.kind === "draft" ? <AgentRunPanel run={agentRun} /> : draft ? <div className="full-draft-editor">
+      <div className="draft-mode-bar" aria-label="初稿查看方式">
+        <button type="button" className={draftView === "read" ? "active" : ""} aria-pressed={draftView === "read"} onClick={() => setDraftView("read")}><BookOpen size={16} />阅读</button>
+        <button type="button" className={draftView === "edit" ? "active" : ""} aria-pressed={draftView === "edit"} onClick={() => setDraftView("edit")}><PencilSimple size={16} />编辑</button>
+      </div>
+      {draftView === "read"
+        ? <DraftMarkdown markdown={draft.markdown} title={draft.title || outline?.title} />
+        : <textarea aria-label="编辑 Markdown 正文" value={draft.markdown} onChange={(event) => setDraft((current) => ({ ...current, markdown: event.target.value }))} />}
+      <div className="draft-actions"><button className="secondary icon-button" onClick={generateFullDraft}><ArrowsClockwise size={18} />重新生成全文</button><button className="primary" onClick={openPreview}>进入排版预览</button></div>
+    </div> : <div className="draft-loading error"><span>{draftError || "全文生成未完成"}</span><button className="secondary" onClick={() => setStage("outline")}>返回提纲</button><button className="primary" onClick={generateFullDraft}>重试生成全文</button></div>}</section>}
   </section>;
 }
 
@@ -840,30 +1108,49 @@ function LibraryPage({ search, setSearch, filter, setFilter, articles: visibleAr
   </section>;
 }
 
-function PreviewPage({ article, theme, setTheme, showToc, setShowToc, showSignature, setShowSignature, notify, onSaved, onBack, onOpenSkills, agentStatus }) {
-  const [layoutHtml, setLayoutHtml] = useState(article?.layoutHtml || "");
+function PreviewPage({ article, theme, setTheme, notify, onSaved, onBack, onOpenSkills, agentStatus, writingSnapshot, onNavigateWritingStage }) {
+  const title = article?.title || "尚未生成文章";
+  const markdown = article?.markdown || "";
+  const generatedTitleCandidates = Array.isArray(article?.titleCandidates) ? article.titleCandidates.filter(Boolean).slice(0, 10) : [];
+  const titleCandidates = generatedTitleCandidates.length ? generatedTitleCandidates : [title];
+  const contentText = `${title}\n${markdown}`;
+  const recommended = contentText.match(/教程|步骤|清单|工具/) ? themes[0] : contentText.match(/复盘|案例|手记/) ? themes[5] : contentText.match(/设计|科技|AI|专业/) ? themes[2] : contentText.match(/随笔|生活|思考/) ? themes[3] : themes[1];
+  const initialTheme = themes.find((item) => item[0] === article?.theme) || recommended;
+  const articleSettings = normalizeArticleSettings(article?.articleSettings || defaultArticleSettings);
+  const initialShowToc = typeof article?.articleSettings?.showToc === "boolean" ? article.articleSettings.showToc : true;
+  const showSignature = articleSettings.showSignature;
+  const initialLayoutSourceKey = getLayoutSourceKey({
+    markdown,
+    themeName: initialTheme[0],
+    showToc: initialShowToc,
+    articleSettings,
+  });
+  const initialLayoutValid = Boolean(article?.layoutHtml && article?.theme && article.articleSettings?.layoutSourceKey === initialLayoutSourceKey);
+  const [chosenTheme, setChosenTheme] = useState(article?.theme ? initialTheme : null);
+  const [layoutHtml, setLayoutHtml] = useState(initialLayoutValid ? article?.layoutHtml || "" : "");
   const [layoutLoading, setLayoutLoading] = useState(false);
+  const [layoutDirty, setLayoutDirty] = useState(Boolean(markdown && !initialLayoutValid));
   const [layoutError, setLayoutError] = useState("");
   const [previewMode, setPreviewMode] = useState("wide");
-  const [openPanel, setOpenPanel] = useState("article");
-  const [articleSettings, setArticleSettings] = useState({
-    author: article?.articleSettings?.author || "",
-    authorBio: article?.articleSettings?.authorBio || "",
-    digest: article?.articleSettings?.digest || "",
-  });
+  const [openPanel, setOpenPanel] = useState("titles");
+  const [showToc, setShowToc] = useState(initialShowToc);
+  const [themePreview, setThemePreview] = useState(null);
   const [coverUrl, setCoverUrl] = useState("");
   const [coverFit, setCoverFit] = useState("cover");
   const [coverCandidates, setCoverCandidates] = useState([]);
+  const [coverLightboxIndex, setCoverLightboxIndex] = useState(null);
   const [coverGenerating, setCoverGenerating] = useState(false);
   const [coverError, setCoverError] = useState("");
   const [bodyStyle, setBodyStyle] = useState(article?.articleSettings?.bodyStyle || { fontSize: 15, lineHeight: 1.9, paragraphGap: 16 });
-  const autoLayoutStarted = useRef(false);
-  const title = article?.title || "尚未生成文章";
-  const markdown = article?.markdown || "";
-  const contentText = `${title}\n${markdown}`;
-  const recommended = contentText.match(/教程|步骤|清单|工具/) ? themes[0] : contentText.match(/复盘|案例|手记/) ? themes[5] : contentText.match(/设计|科技|AI|专业/) ? themes[2] : contentText.match(/随笔|生活|思考/) ? themes[3] : themes[1];
+  const layoutRequestId = useRef(0);
   const blocks = markdown.split(/\n+/).filter(Boolean).filter((line) => !line.startsWith("# "));
-  const applyTheme = async (selectedTheme = theme) => {
+  const activeTheme = chosenTheme || recommended;
+  const applyTheme = async (selectedTheme = chosenTheme) => {
+    if (!selectedTheme) return notify("先选择一套主题，再生成排版");
+    const requestId = layoutRequestId.current + 1;
+    layoutRequestId.current = requestId;
+    setChosenTheme(selectedTheme);
+    setTheme(selectedTheme);
     setLayoutLoading(true); setLayoutError("");
     try {
       const response = await fetch("/api/writing/layout", {
@@ -881,8 +1168,16 @@ function PreviewPage({ article, theme, setTheme, showToc, setShowToc, showSignat
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "排版失败");
+      if (requestId !== layoutRequestId.current) return;
       setLayoutHtml(result.html);
+      setLayoutDirty(false);
       if (article?.id) {
+        const layoutSourceKey = getLayoutSourceKey({
+          markdown,
+          themeName: selectedTheme[0],
+          showToc,
+          articleSettings,
+        });
         const saveResponse = await fetch(`/api/library/${article.id}`, {
           method: "PUT",
           headers: { "content-type": "application/json" },
@@ -891,7 +1186,7 @@ function PreviewPage({ article, theme, setTheme, showToc, setShowToc, showSignat
             status: "已排版",
             theme: selectedTheme[0],
             layoutHtml: result.html,
-            articleSettings: { ...articleSettings, showSignature, bodyStyle },
+            articleSettings: { ...articleSettings, showToc, bodyStyle, layoutSourceKey },
           }),
         });
         if (!saveResponse.ok) throw new Error("排版已完成，但文章状态保存失败");
@@ -899,16 +1194,20 @@ function PreviewPage({ article, theme, setTheme, showToc, setShowToc, showSignat
       }
       notify(`${selectedTheme[0]}已应用，公众号兼容校验通过`);
     }
-    catch (error) { setLayoutError(error.message); } finally { setLayoutLoading(false); }
+    catch (error) {
+      if (requestId === layoutRequestId.current) setLayoutError(error.message);
+    } finally {
+      if (requestId === layoutRequestId.current) setLayoutLoading(false);
+    }
   };
   useEffect(() => {
-    if (!article || autoLayoutStarted.current) return;
-    autoLayoutStarted.current = true;
-    if (typeof article.articleSettings?.showSignature === "boolean") setShowSignature(article.articleSettings.showSignature);
-    setTheme(recommended);
-    if (article.previewOnly || article.layoutHtml) return;
-    applyTheme(recommended);
-  }, [article]);
+    if (coverLightboxIndex === null) return undefined;
+    const close = (event) => {
+      if (event.key === "Escape") setCoverLightboxIndex(null);
+    };
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [coverLightboxIndex]);
   const sanitizeSignatureTemplate = (html) => {
     if (!html || !html.includes("{{")) return html;
     const documentValue = new DOMParser().parseFromString(html, "text/html");
@@ -933,9 +1232,16 @@ function PreviewPage({ article, theme, setTheme, showToc, setShowToc, showSignat
     try { await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([exportHtml], { type: "text/html" }), "text/plain": new Blob([markdown], { type: "text/plain" }) })]); notify("已复制公众号富文本"); }
     catch { notify("浏览器未允许富文本复制，请重试"); }
   };
-  const updateArticleSetting = (key, value) => {
-    setArticleSettings((current) => ({ ...current, [key]: value }));
-    setLayoutHtml("");
+  const copyTitle = async (value) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      notify("标题已复制");
+    } catch {
+      notify("浏览器未允许复制，请重试");
+    }
+  };
+  const markLayoutDirty = () => {
+    setLayoutDirty(true);
     setLayoutError("");
   };
   const generateCovers = async () => {
@@ -950,6 +1256,7 @@ function PreviewPage({ article, theme, setTheme, showToc, setShowToc, showSignat
       if (!response.ok) throw new Error(result.error || "封面生成失败");
       setCoverCandidates(result.covers || []);
       setCoverUrl(result.covers?.[0]?.url || "");
+      setCoverLightboxIndex(null);
       notify(`已生成 ${result.covers?.length || 0} 个封面方案`);
     } catch (error) { setCoverError(error.message); }
     finally { setCoverGenerating(false); }
@@ -957,54 +1264,90 @@ function PreviewPage({ article, theme, setTheme, showToc, setShowToc, showSignat
   const panelButton = (key, icon, label, hint) => <button className={`inspector-row ${openPanel === key ? "open" : ""}`} onClick={() => setOpenPanel(openPanel === key ? "" : key)}>
     <span>{icon}</span><span><b>{label}</b><small>{hint}</small></span>{openPanel === key ? <CaretDown size={17} /> : <CaretRight size={17} />}
   </button>;
+  const showThemePreview = (item, target) => {
+    const rect = target.getBoundingClientRect();
+    const width = Math.min(388, window.innerWidth - 24);
+    const height = 436;
+    setThemePreview({
+      item,
+      left: Math.max(12, Math.min(rect.right + 12, window.innerWidth - width - 12)),
+      top: Math.max(12, Math.min(rect.top - 52, window.innerHeight - height - 12)),
+      width,
+    });
+  };
   const previewStyle = {
-    "--accent": theme[1],
-    "--tint": theme[2],
+    "--accent": activeTheme[1],
+    "--tint": activeTheme[2],
     "--body-size": `${bodyStyle.fontSize}px`,
     "--body-leading": bodyStyle.lineHeight,
     "--paragraph-gap": `${bodyStyle.paragraphGap}px`,
   };
-  const layoutReady = Boolean(layoutHtml || article?.previewOnly);
+  const layoutReady = Boolean(layoutHtml);
   const coverSkillReady = Boolean(agentStatus?.skills?.baoyuCover);
+  const lightboxCover = coverLightboxIndex === null ? null : coverCandidates[coverLightboxIndex];
+  const moveCoverLightbox = (direction) => {
+    setCoverLightboxIndex((current) => {
+      if (current === null || !coverCandidates.length) return null;
+      return (current + direction + coverCandidates.length) % coverCandidates.length;
+    });
+  };
   return <section className="page preview-page">
     <header className="preview-header">
-      <div className="preview-title"><div><h1>排版预览</h1><p>检查文章效果，调整细节后复制到公众号</p></div></div>
-      <div className="topbar-actions"><button className="secondary back-with-icon" onClick={onBack}><ArrowLeft size={17} />返回文章</button><button className="primary" disabled={!layoutReady} onClick={copyRichText}><Copy size={19} />复制到公众号</button></div>
+      <div className="preview-title"><div><h1>排版预览</h1><p>先确认主题效果，再生成可以复制到公众号的排版</p></div></div>
+      <div className="topbar-actions"><button className="secondary back-with-icon" onClick={onBack}><ArrowLeft size={17} />返回文章</button><button className="primary" disabled={!layoutReady || layoutDirty || layoutLoading} onClick={copyRichText}><Copy size={19} />复制到公众号</button></div>
     </header>
+    {writingSnapshot && <WritingFlow activeStage="preview" snapshot={writingSnapshot} onNavigate={onNavigateWritingStage} className="preview-writing-flow" />}
     <div className="preview-layout">
       <aside className="preview-controls">
         <div className="current-article"><small>当前文章</small><h2>{title}</h2></div>
-        <div className="theme-list"><div className="theme-heading"><small>选择主题</small><span>{recommended[0]}推荐</span></div>{themes.map((item) => <button key={item[0]} className={theme[0] === item[0] ? "selected" : ""} onClick={() => { setTheme(item); setLayoutHtml(""); setLayoutError(""); }}><i style={{ background: item[1] }} />{item[0]}{item[0] === recommended[0] && <em>推荐</em>}{theme[0] === item[0] && <Check size={18} weight="bold" />}</button>)}</div>
-        <button className="primary full apply-theme" disabled={layoutLoading} onClick={() => applyTheme(theme)}>{layoutLoading ? "正在应用排版…" : `应用「${theme[0]}」`}</button>
+        <div className="theme-list"><div className="theme-heading"><small>选择主题</small><span>悬浮查看效果</span></div>{themes.map((item) => <button
+          key={item[0]}
+          className={chosenTheme?.[0] === item[0] ? "selected" : ""}
+          onMouseEnter={(event) => showThemePreview(item, event.currentTarget)}
+          onMouseLeave={() => setThemePreview(null)}
+          onFocus={(event) => showThemePreview(item, event.currentTarget)}
+          onBlur={() => setThemePreview(null)}
+          onClick={() => { setChosenTheme(item); setTheme(item); markLayoutDirty(); }}
+        ><i style={{ background: item[1] }} />{item[0]}{item[0] === recommended[0] && <em>推荐</em>}{chosenTheme?.[0] === item[0] && <Check size={18} weight="bold" />}</button>)}</div>
+        <button className="primary full apply-theme" disabled={layoutLoading || !markdown || !chosenTheme} onClick={() => applyTheme(chosenTheme)}>{layoutLoading ? "正在生成排版…" : !chosenTheme ? "选择主题后生成" : layoutDirty || !layoutHtml ? `生成「${chosenTheme[0]}」排版` : `重新应用「${chosenTheme[0]}」`}</button>
         {layoutError && <p className="layout-error">{layoutError}</p>}
-        <div className="quick-toggles"><Toggle label="显示目录" checked={showToc} setChecked={(value) => { setShowToc(value); setLayoutHtml(""); }} /></div>
+        {!chosenTheme && <p className="theme-choice-hint">{recommended[0]}更适合这篇文章，你也可以查看其它主题后再决定。</p>}
+        <div className="quick-toggles"><Toggle label="显示目录" checked={showToc} setChecked={(value) => { setShowToc(value); markLayoutDirty(); }} /></div>
       </aside>
       <section className={`preview-canvas ${previewMode}`}>
         <div className="preview-toolbar">
           <div className="segmented"><button className={previewMode === "mobile" ? "active" : ""} onClick={() => setPreviewMode("mobile")}>手机</button><button className={previewMode === "wide" ? "active" : ""} onClick={() => setPreviewMode("wide")}>宽屏</button></div>
-          <span className={layoutError ? "error" : ""}>{layoutLoading ? <><Sparkle size={18} />正在应用 GZH Design</> : layoutReady ? <>排版已应用</> : <>主题或文章设置有修改</>}</span>
+          <span className={layoutError ? "error" : ""}>{layoutLoading ? <><Sparkle size={18} />正在生成 GZH Design 排版</> : layoutReady && !layoutDirty ? <>排版已应用</> : chosenTheme ? <>已选择「{chosenTheme[0]}」，等待生成</> : <>选择主题后生成排版</>}</span>
         </div>
-        <div className={`preview-paper ${layoutLoading ? "is-loading" : ""}`} style={previewStyle}>
+        <div className={`preview-paper ${layoutLoading && !layoutHtml ? "is-loading" : ""}`} style={previewStyle}>
           {coverUrl && <img className="article-cover" src={coverUrl} alt="文章封面" style={{ objectFit: coverFit }} />}
-          {layoutLoading ? <div className="layout-loading"><Sparkle size={24} />正在生成公众号排版…</div> : layoutHtml ? <article className="article-preview gzh-rendered" dangerouslySetInnerHTML={{ __html: sanitizeSignatureTemplate(layoutHtml) }} /> : <article className="article-preview"><h1>{title}</h1>{articleSettings.author && <p className="article-info">{articleSettings.author}</p>}{articleSettings.digest && <blockquote>{articleSettings.digest}</blockquote>}{showToc && <div className="toc">{blocks.filter((line) => line.startsWith("## ")).slice(0, 3).map((line) => line.replace(/^## /, "")).join(" · ")}</div>}{blocks.map((line, index) => line.startsWith("## ") ? <h2 key={index}><b>{String(blocks.slice(0, index + 1).filter((item) => item.startsWith("## ")).length).padStart(2, "0")}</b>{line.replace(/^## /, "")}</h2> : line.startsWith("> ") ? <blockquote key={index}>{line.replace(/^> /, "")}</blockquote> : <p key={index}>{line.replace(/^[-*]\s/, "")}</p>)}{showSignature && (articleSettings.author || articleSettings.authorBio) && <footer>我是 <strong>{articleSettings.author || "作者"}</strong>{articleSettings.authorBio ? `，${articleSettings.authorBio}` : ""}</footer>}</article>}
+          {layoutHtml ? <article className="article-preview gzh-rendered" dangerouslySetInnerHTML={{ __html: sanitizeSignatureTemplate(layoutHtml) }} /> : layoutLoading ? <div className="layout-loading"><Sparkle size={24} />正在生成公众号排版…</div> : <article className="article-preview"><h1>{title}</h1>{articleSettings.author && <p className="article-info">{articleSettings.author}</p>}{articleSettings.digest && <blockquote>{articleSettings.digest}</blockquote>}{showToc && <div className="toc">{blocks.filter((line) => line.startsWith("## ")).slice(0, 3).map((line) => line.replace(/^## /, "")).join(" · ")}</div>}{blocks.map((line, index) => line.startsWith("## ") ? <h2 key={index}><b>{String(blocks.slice(0, index + 1).filter((item) => item.startsWith("## ")).length).padStart(2, "0")}</b>{line.replace(/^## /, "")}</h2> : line.startsWith("> ") ? <blockquote key={index}>{line.replace(/^> /, "")}</blockquote> : <p key={index}>{line.replace(/^[-*]\s/, "")}</p>)}{showSignature && (articleSettings.author || articleSettings.authorBio) && <footer>我是 <strong>{articleSettings.author || "作者"}</strong>{articleSettings.authorBio ? `，${articleSettings.authorBio}` : ""}</footer>}</article>}
+          {layoutLoading && layoutHtml && <div className="layout-refreshing"><Sparkle size={16} />正在更新排版，当前内容仍可查看</div>}
         </div>
       </section>
       <aside className="preview-inspector">
         <div className="inspector-sections">
-          {panelButton("article", <FileText size={20} />, "文章设置", articleSettings.author || "尚未填写作者")}
-          {openPanel === "article" && <div className="inspector-panel">
-            <label>作者名称<input value={articleSettings.author} onChange={(event) => updateArticleSetting("author", event.target.value)} placeholder="例如：稿间编辑部" /></label>
-            <label>作者简介<input value={articleSettings.authorBio} onChange={(event) => updateArticleSetting("authorBio", event.target.value)} placeholder="例如：持续记录工具、创作与真实经验" /></label>
-            <label>文章摘要<textarea value={articleSettings.digest} onChange={(event) => updateArticleSetting("digest", event.target.value)} placeholder="用于主题中的引言或摘要组件" /></label>
-            <Toggle label="显示作者签名" checked={showSignature} setChecked={(value) => { setShowSignature(value); setLayoutHtml(""); }} />
-            {showSignature && !(articleSettings.author || articleSettings.authorBio) && <small className="setting-hint">填写作者或简介后才会生成签名，不会保留空模板。</small>}
+          {panelButton("titles", <TextAa size={20} />, "标题候选", generatedTitleCandidates.length === 10 ? "10 个 · 点击即可复制" : "当前文章标题")}
+          {openPanel === "titles" && <div className="inspector-panel title-candidates-panel">
+            <p>{generatedTitleCandidates.length === 10 ? "挑一个最适合这次发布语境的标题，直接复制到公众号。" : "这篇文章生成时还没有标题候选。下次重新生成全文时会一次给出 10 个，不会增加 Agent 调用。"}</p>
+            <div className="title-candidate-list">{titleCandidates.map((candidate, index) => <article key={`${candidate}-${index}`}>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              <p>{candidate}</p>
+              <button type="button" onClick={() => copyTitle(candidate)} title="复制标题" aria-label={`复制标题：${candidate}`}><Copy size={15} /></button>
+            </article>)}</div>
           </div>}
           {panelButton("cover", <ImageSquare size={20} />, "封面选择", coverUrl ? "已选择一个方案" : "可选 · 根据本文生成")}
           {openPanel === "cover" && <div className="inspector-panel cover-generator">
             <p>生成 2 个适合本文的公众号封面，选中后可单独下载，再到公众号后台上传。</p>
             {!coverSkillReady ? <button className="secondary full" onClick={onOpenSkills}><DownloadSimple size={17} />先安装 baoyu-skills</button> : <button className="primary full" disabled={coverGenerating} onClick={generateCovers}><Sparkle size={17} />{coverGenerating ? "正在生成封面…" : "生成 2 个封面方案"}</button>}
             {coverError && <p className="layout-error">{coverError}</p>}
-            {coverCandidates.length > 0 && <div className="cover-candidates">{coverCandidates.map((candidate, index) => <button className={coverUrl === candidate.url ? "selected" : ""} onClick={() => setCoverUrl(candidate.url)} key={candidate.url}><img src={candidate.url} alt={`封面方案 ${index + 1}`} /><span>方案 {index + 1}{coverUrl === candidate.url && <Check size={14} weight="bold" />}</span></button>)}</div>}
+            {coverCandidates.length > 0 && <div className="cover-candidates">{coverCandidates.map((candidate, index) => <div className={`cover-candidate ${coverUrl === candidate.url ? "selected" : ""}`} key={candidate.url}>
+              <button className="cover-preview-button" type="button" onClick={() => setCoverLightboxIndex(index)} aria-label={`放大查看封面方案 ${index + 1}`} title="放大查看">
+                <img src={candidate.url} alt={`封面方案 ${index + 1}`} />
+                <span><MagnifyingGlass size={15} />查看大图</span>
+              </button>
+              <button className="cover-select-button" type="button" onClick={() => setCoverUrl(candidate.url)}>方案 {index + 1}{coverUrl === candidate.url && <Check size={14} weight="bold" />}</button>
+            </div>)}</div>}
             {coverUrl && <><label>预览裁切<select value={coverFit} onChange={(event) => setCoverFit(event.target.value)}><option value="cover">填满画面</option><option value="contain">完整显示</option></select></label><a className="cover-download" href={coverUrl} download={`${title}-封面.png`}><DownloadSimple size={16} />下载当前封面</a></>}
           </div>}
           {panelButton("body", <NotePencil size={20} />, "正文样式", `${bodyStyle.fontSize}px · ${bodyStyle.lineHeight} 倍行距`)}
@@ -1012,6 +1355,22 @@ function PreviewPage({ article, theme, setTheme, showToc, setShowToc, showSignat
         </div>
       </aside>
     </div>
+    {themePreview && <aside className="theme-preview-popover" style={{ left: themePreview.left, top: themePreview.top, width: themePreview.width }}>
+      <header><div><i style={{ background: themePreview.item[1] }} /><span><b>{themePreview.item[0]}</b><small>{themePreview.item[4]}</small></span></div><em>{themePreview.item[0] === recommended[0] ? "适合本文" : "主题示例"}</em></header>
+      <iframe title={`${themePreview.item[0]}主题效果`} src={`/api/theme-previews/${themePreview.item[3]}`} loading="lazy" sandbox="" />
+      <p>本地 Gallery 示例 · 查看不会调用 Agent</p>
+    </aside>}
+    {lightboxCover && <div className="cover-lightbox" role="dialog" aria-modal="true" aria-label="封面大图预览" onClick={() => setCoverLightboxIndex(null)}>
+      <div className="cover-lightbox-dialog" onClick={(event) => event.stopPropagation()}>
+        <header><div><b>封面方案 {coverLightboxIndex + 1}</b><span>{coverLightboxIndex + 1} / {coverCandidates.length}</span></div><button type="button" onClick={() => setCoverLightboxIndex(null)} aria-label="关闭封面预览"><X size={20} /></button></header>
+        <div className="cover-lightbox-stage">
+          {coverCandidates.length > 1 && <button className="cover-lightbox-nav previous" type="button" onClick={() => moveCoverLightbox(-1)} aria-label="上一张封面"><CaretLeft size={24} /></button>}
+          <img src={lightboxCover.url} alt={`封面方案 ${coverLightboxIndex + 1} 大图`} />
+          {coverCandidates.length > 1 && <button className="cover-lightbox-nav next" type="button" onClick={() => moveCoverLightbox(1)} aria-label="下一张封面"><CaretRight size={24} /></button>}
+        </div>
+        <footer><button className="secondary" type="button" onClick={() => { setCoverUrl(lightboxCover.url); setCoverLightboxIndex(null); }}>{coverUrl === lightboxCover.url ? <><Check size={16} />当前已选</> : "选用此封面"}</button><a className="primary" href={lightboxCover.url} download={`${title}-封面-${coverLightboxIndex + 1}.png`}><DownloadSimple size={17} />下载原图</a></footer>
+      </div>
+    </div>}
   </section>;
 }
 
